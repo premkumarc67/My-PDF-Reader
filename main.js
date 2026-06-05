@@ -7,9 +7,6 @@ const DOM = {
     dropZone: document.getElementById('drop-zone'),
     fileInput: document.getElementById('file-input'),
     pdfContainer: document.getElementById('pdf-container'),
-    pageWrapper: document.getElementById('page-wrapper'),
-    textLayer: document.getElementById('text-layer'),
-    pdfRender: document.getElementById('pdf-render'),
     fileName: document.getElementById('file-name'),
     pageNum: document.getElementById('page-num'),
     pageCount: document.getElementById('page-count'),
@@ -24,12 +21,13 @@ const DOM = {
 
 let pdfDoc = null;
 let pageNum = 1;
-let pageRendering = false;
-let pageNumPending = null;
 let scale = 1.0;
 const scaleStep = 0.10;
 const maxScale = 3.0;
 const minScale = 0.5;
+
+let pages = [];
+let observer = null;
 
 // Initial state setup
 function init() {
@@ -79,9 +77,7 @@ function setupEventListeners() {
     DOM.btnFullscreen.addEventListener('click', toggleFullScreen);
     DOM.btnClose.addEventListener('click', closeViewer);
 
-    let wheelTimeout = null;
-
-    // Zoom on Ctrl + Scroll, turn page on regular scroll at boundaries
+    // Zoom on Ctrl + Scroll
     DOM.pdfContainer.addEventListener('wheel', (e) => {
         if (e.ctrlKey) {
             e.preventDefault();
@@ -90,30 +86,34 @@ function setupEventListeners() {
             } else {
                 onZoomOut();
             }
-        } else {
-            const { scrollTop, scrollHeight, clientHeight } = DOM.pdfContainer;
-            
-            // Check if reached bottom and scrolling down
-            if (e.deltaY > 0 && scrollTop + clientHeight >= scrollHeight - 2) {
-                if (!wheelTimeout) {
-                    onNextPage();
-                    DOM.pdfContainer.scrollTop = 0;
-                    wheelTimeout = setTimeout(() => wheelTimeout = null, 800);
-                }
-                e.preventDefault();
-            }
-            // Check if reached top and scrolling up
-            else if (e.deltaY < 0 && scrollTop <= 2) {
-                if (!wheelTimeout) {
-                    onPrevPage();
-                    // Scroll to bottom after a slight delay to allow render
-                    setTimeout(() => DOM.pdfContainer.scrollTop = 99999, 100);
-                    wheelTimeout = setTimeout(() => wheelTimeout = null, 800);
-                }
-                e.preventDefault();
-            }
         }
     }, { passive: false });
+
+    // Track scroll to update current page number
+    DOM.pdfContainer.addEventListener('scroll', () => {
+        if (!pages.length) return;
+        
+        let closestPageNum = pageNum;
+        let minDistance = Infinity;
+        const containerRect = DOM.pdfContainer.getBoundingClientRect();
+        const viewportCenter = containerRect.top + containerRect.height / 2;
+
+        pages.forEach(pageObj => {
+            const rect = pageObj.wrapper.getBoundingClientRect();
+            const pageCenter = rect.top + rect.height / 2;
+            const distance = Math.abs(pageCenter - viewportCenter);
+
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestPageNum = pageObj.num;
+            }
+        });
+
+        if (pageNum !== closestPageNum) {
+            pageNum = closestPageNum;
+            DOM.pageNum.textContent = pageNum;
+        }
+    }, { passive: true });
 }
 
 function handleFile(file) {
@@ -143,90 +143,186 @@ function loadPDF(data) {
         DOM.uploadScreen.classList.add('hidden');
         DOM.viewerScreen.classList.remove('hidden');
         
-        // Let container calculate height before rendering
-        setTimeout(() => renderPage(pageNum), 50);
+        initPages();
     }).catch(err => {
         console.error('Error rendering PDF:', err);
         alert('Could not render the PDF file.');
     });
 }
 
-function renderPage(num) {
-    pageRendering = true;
+function initPages() {
+    DOM.pdfContainer.innerHTML = '';
+    pages = [];
     
-    pdfDoc.getPage(num).then(page => {
+    if (observer) observer.disconnect();
+    observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                const pageObj = pages[entry.target.dataset.pageIndex];
+                if (!pageObj.rendered && !pageObj.rendering) {
+                    renderPage(pageObj);
+                }
+            }
+        });
+    }, {
+        root: DOM.pdfContainer,
+        rootMargin: '300px 0px' // Pre-load slightly before scrolling into view
+    });
+
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'page-wrapper';
+        wrapper.dataset.pageIndex = i - 1;
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'pdf-render-canvas';
+        canvas.style.display = 'block';
+
+        const textLayer = document.createElement('div');
+        textLayer.className = 'textLayer';
+
+        wrapper.appendChild(canvas);
+        wrapper.appendChild(textLayer);
+        DOM.pdfContainer.appendChild(wrapper);
+
+        const pageObj = {
+            num: i,
+            wrapper,
+            canvas,
+            textLayer,
+            rendered: false,
+            rendering: false,
+            pageRef: null
+        };
+
+        pages.push(pageObj);
+        observer.observe(wrapper);
+    }
+
+    // Set placeholder sizes so they don't all intersect at once
+    pdfDoc.getPage(1).then(page => {
         const viewport = page.getViewport({ scale: scale });
-        DOM.pdfRender.height = viewport.height;
-        DOM.pdfRender.width = viewport.width;
-        DOM.pageWrapper.style.height = viewport.height + 'px';
-        DOM.pageWrapper.style.width = viewport.width + 'px';
-        DOM.textLayer.style.height = viewport.height + 'px';
-        DOM.textLayer.style.width = viewport.width + 'px';
-        DOM.textLayer.innerHTML = '';
+        pages.forEach(p => {
+            p.wrapper.style.width = viewport.width + 'px';
+            p.wrapper.style.height = viewport.height + 'px';
+        });
+    });
+}
+
+function renderPage(pageObj) {
+    if (pageObj.rendering) {
+        pageObj.renderPending = true;
+        return;
+    }
+    pageObj.rendering = true;
+    
+    const renderTaskPromise = pageObj.pageRef 
+        ? Promise.resolve(pageObj.pageRef) 
+        : pdfDoc.getPage(pageObj.num).then(p => { pageObj.pageRef = p; return p; });
+
+    renderTaskPromise.then(page => {
+        const viewport = page.getViewport({ scale: scale });
+        pageObj.canvas.height = viewport.height;
+        pageObj.canvas.width = viewport.width;
+        pageObj.wrapper.style.height = viewport.height + 'px';
+        pageObj.wrapper.style.width = viewport.width + 'px';
+        pageObj.textLayer.style.height = viewport.height + 'px';
+        pageObj.textLayer.style.width = viewport.width + 'px';
+        pageObj.textLayer.innerHTML = '';
 
         const renderContext = {
-            canvasContext: DOM.pdfRender.getContext('2d'),
+            canvasContext: pageObj.canvas.getContext('2d'),
             viewport: viewport
         };
         
         const renderTask = page.render(renderContext);
+        pageObj.renderTask = renderTask;
         
         renderTask.promise.then(() => {
-            pageRendering = false;
+            pageObj.rendered = true;
+            pageObj.rendering = false;
             
             // Render text layer
             page.getTextContent().then(textContent => {
-                DOM.textLayer.style.setProperty('--scale-factor', scale);
+                pageObj.textLayer.style.setProperty('--scale-factor', scale);
                 pdfjsLib.renderTextLayer({
                     textContentSource: textContent,
-                    container: DOM.textLayer,
+                    container: pageObj.textLayer,
                     viewport: viewport,
                     textDivs: []
                 });
             });
 
-            if (pageNumPending !== null) {
-                renderPage(pageNumPending);
-                pageNumPending = null;
+            if (pageObj.renderPending) {
+                pageObj.renderPending = false;
+                renderPage(pageObj);
             }
+        }).catch(err => {
+             console.error('Render cancelled or failed:', err);
+             pageObj.rendering = false;
+             if (pageObj.renderPending) {
+                 pageObj.renderPending = false;
+                 renderPage(pageObj);
+             }
         });
     });
-
-    DOM.pageNum.textContent = num;
 }
 
-function queueRenderPage(num) {
-    if (pageRendering) {
-        pageNumPending = num;
-    } else {
-        renderPage(num);
-    }
+function applyZoom() {
+    updateZoomVal();
+    // Update sizes of all pages and re-render them if they have been rendered
+    pages.forEach(pageObj => {
+        pageObj.rendered = false;
+        pageObj.textLayer.innerHTML = ''; // Clear text layer
+        
+        if (pageObj.pageRef) {
+            const viewport = pageObj.pageRef.getViewport({ scale: scale });
+            pageObj.wrapper.style.height = viewport.height + 'px';
+            pageObj.wrapper.style.width = viewport.width + 'px';
+        }
+
+        // The observer will naturally catch intersecting pages and re-render them
+        // But for currently visible ones we should trigger render directly just to be fast
+        const rect = pageObj.wrapper.getBoundingClientRect();
+        const containerRect = DOM.pdfContainer.getBoundingClientRect();
+        
+        const isVisible = (
+            rect.top < containerRect.bottom + 300 &&
+            rect.bottom > containerRect.top - 300
+        );
+        
+        if (isVisible) {
+            renderPage(pageObj);
+        }
+    });
 }
 
 function onPrevPage() {
     if (pageNum <= 1) return;
-    pageNum--;
-    queueRenderPage(pageNum);
+    const targetPage = pages[pageNum - 2];
+    if (targetPage) {
+        targetPage.wrapper.scrollIntoView({ behavior: 'smooth' });
+    }
 }
 
 function onNextPage() {
     if (pageNum >= pdfDoc.numPages) return;
-    pageNum++;
-    queueRenderPage(pageNum);
+    const targetPage = pages[pageNum];
+    if (targetPage) {
+        targetPage.wrapper.scrollIntoView({ behavior: 'smooth' });
+    }
 }
 
 function onZoomIn() {
     if (scale >= maxScale) return;
     scale += scaleStep;
-    updateZoomVal();
-    queueRenderPage(pageNum);
+    applyZoom();
 }
 
 function onZoomOut() {
     if (scale <= minScale) return;
     scale -= scaleStep;
-    updateZoomVal();
-    queueRenderPage(pageNum);
+    applyZoom();
 }
 
 function updateZoomVal() {
@@ -245,11 +341,14 @@ function toggleFullScreen() {
 
 function closeViewer() {
     pdfDoc = null;
+    pages = [];
+    if (observer) observer.disconnect();
+    DOM.pdfContainer.innerHTML = '';
+    
     DOM.viewerScreen.classList.add('hidden');
     DOM.uploadScreen.classList.remove('hidden');
     DOM.fileInput.value = ''; // Reset input
     
-    // Exit full screen if active
     if (document.fullscreenElement) {
         document.exitFullscreen();
     }
