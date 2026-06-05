@@ -114,6 +114,23 @@ function setupEventListeners() {
             DOM.pageNum.textContent = pageNum;
         }
     }, { passive: true });
+
+    // Global Keyboard Shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey && e.key === '2') {
+            e.preventDefault(); // Prevent browser tab switching
+            onZoomIn();
+        } else if (e.ctrlKey && e.key === '3') {
+            e.preventDefault(); // Prevent browser tab switching
+            onZoomOut();
+        } else if (e.key.toLowerCase() === 'f' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            // Ignore if typing in an input (future proofing)
+            if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                e.preventDefault();
+                toggleFullScreen();
+            }
+        }
+    });
 }
 
 function handleFile(file) {
@@ -203,8 +220,8 @@ function initPages() {
     pdfDoc.getPage(1).then(page => {
         const viewport = page.getViewport({ scale: scale });
         pages.forEach(p => {
-            p.wrapper.style.width = viewport.width + 'px';
-            p.wrapper.style.height = viewport.height + 'px';
+            p.wrapper.style.width = Math.floor(viewport.width) + 'px';
+            p.wrapper.style.height = Math.floor(viewport.height) + 'px';
         });
     });
 }
@@ -222,16 +239,26 @@ function renderPage(pageObj) {
 
     renderTaskPromise.then(page => {
         const viewport = page.getViewport({ scale: scale });
-        pageObj.canvas.height = viewport.height;
-        pageObj.canvas.width = viewport.width;
-        pageObj.wrapper.style.height = viewport.height + 'px';
-        pageObj.wrapper.style.width = viewport.width + 'px';
-        pageObj.textLayer.style.height = viewport.height + 'px';
-        pageObj.textLayer.style.width = viewport.width + 'px';
+        const outputScale = window.devicePixelRatio || 1;
+
+        pageObj.canvas.height = Math.floor(viewport.height * outputScale);
+        pageObj.canvas.width = Math.floor(viewport.width * outputScale);
+        pageObj.canvas.style.height = Math.floor(viewport.height) + 'px';
+        pageObj.canvas.style.width = Math.floor(viewport.width) + 'px';
+        
+        pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
+        pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
+        pageObj.textLayer.style.height = Math.floor(viewport.height) + 'px';
+        pageObj.textLayer.style.width = Math.floor(viewport.width) + 'px';
         pageObj.textLayer.innerHTML = '';
+
+        const transform = outputScale !== 1
+            ? [outputScale, 0, 0, outputScale, 0, 0]
+            : null;
 
         const renderContext = {
             canvasContext: pageObj.canvas.getContext('2d'),
+            transform: transform,
             viewport: viewport
         };
         
@@ -277,8 +304,8 @@ function applyZoom() {
         
         if (pageObj.pageRef) {
             const viewport = pageObj.pageRef.getViewport({ scale: scale });
-            pageObj.wrapper.style.height = viewport.height + 'px';
-            pageObj.wrapper.style.width = viewport.width + 'px';
+            pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
+            pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
         }
 
         // The observer will naturally catch intersecting pages and re-render them
