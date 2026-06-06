@@ -79,13 +79,22 @@ function setupEventListeners() {
     DOM.btnClose.addEventListener('click', closeViewer);
 
     // Zoom on Ctrl + Scroll
-    DOM.pdfContainer.addEventListener('wheel', (e) => {
-        if (e.ctrlKey) {
+    window.addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
-            if (e.deltaY < 0) {
-                onZoomIn();
-            } else {
-                onZoomOut();
+            
+            // Continuous zoom factor based on deltaY
+            const zoomSensitivity = 0.01; 
+            const zoomFactor = Math.exp(-e.deltaY * zoomSensitivity);
+            
+            const newScale = Math.min(maxScale, Math.max(minScale, scale * zoomFactor));
+
+            if (Math.abs(newScale - scale) > 0.001) {
+                const rect = DOM.pdfContainer.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top;
+
+                applyZoomAtPoint(newScale, mouseX, mouseY);
             }
         }
     }, { passive: false });
@@ -214,6 +223,8 @@ function initPages() {
         const canvas = document.createElement('canvas');
         canvas.className = 'pdf-render-canvas';
         canvas.style.display = 'block';
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
 
         wrapper.appendChild(canvas);
         DOM.pdfContainer.appendChild(wrapper);
@@ -266,8 +277,8 @@ function renderPage(pageObj) {
 
         pageObj.canvas.height = Math.floor(viewport.height * outputScale);
         pageObj.canvas.width = Math.floor(viewport.width * outputScale);
-        pageObj.canvas.style.height = Math.floor(viewport.height) + 'px';
-        pageObj.canvas.style.width = Math.floor(viewport.width) + 'px';
+        pageObj.canvas.style.height = '100%';
+        pageObj.canvas.style.width = '100%';
         
         pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
         pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
@@ -313,33 +324,71 @@ function renderPage(pageObj) {
     });
 }
 
-function applyZoom() {
+let renderDebounceTimeout = null;
+
+function applyZoomAtPoint(newScale, focalX, focalY) {
+    const oldScale = scale;
+    const scrollLeft = DOM.pdfContainer.scrollLeft;
+    const scrollTop = DOM.pdfContainer.scrollTop;
+
+    // Calculate focal point in "world" (unscaled) coordinates
+    const worldX = (scrollLeft + focalX) / oldScale;
+    const worldY = (scrollTop + focalY) / oldScale;
+
+    scale = newScale;
     updateZoomVal();
-    // Update sizes of all pages and re-render them if they have been rendered
+
+    // Re-calculate the expected scroll position
+    const newScrollLeft = worldX * scale - focalX;
+    const newScrollTop = worldY * scale - focalY;
+
     pages.forEach(pageObj => {
         pageObj.rendered = false;
-
-        
         if (pageObj.pageRef) {
             const viewport = pageObj.pageRef.getViewport({ scale: scale });
             pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
             pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
         }
+    });
 
-        // The observer will naturally catch intersecting pages and re-render them
-        // But for currently visible ones we should trigger render directly just to be fast
-        const rect = pageObj.wrapper.getBoundingClientRect();
-        const containerRect = DOM.pdfContainer.getBoundingClientRect();
-        
-        const isVisible = (
-            rect.top < containerRect.bottom + 300 &&
-            rect.bottom > containerRect.top - 300
-        );
-        
-        if (isVisible) {
-            renderPage(pageObj);
+    // Apply the new scroll position
+    DOM.pdfContainer.scrollLeft = newScrollLeft;
+    DOM.pdfContainer.scrollTop = newScrollTop;
+
+    debouncedRender();
+}
+
+function applyZoom() {
+    updateZoomVal();
+    pages.forEach(pageObj => {
+        pageObj.rendered = false;
+        if (pageObj.pageRef) {
+            const viewport = pageObj.pageRef.getViewport({ scale: scale });
+            pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
+            pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
         }
     });
+
+    debouncedRender();
+}
+
+function debouncedRender() {
+    if (renderDebounceTimeout) clearTimeout(renderDebounceTimeout);
+    renderDebounceTimeout = setTimeout(() => {
+        pages.forEach(pageObj => {
+            const rect = pageObj.wrapper.getBoundingClientRect();
+            const containerRect = DOM.pdfContainer.getBoundingClientRect();
+            
+            const isVisible = (
+                rect.top < containerRect.bottom + 300 &&
+                rect.bottom > containerRect.top - 300
+            );
+            
+            if (isVisible) {
+                renderPage(pageObj);
+            }
+        });
+    }, 100);
 }
 
 function onPrevPage() {
