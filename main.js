@@ -2,6 +2,9 @@
 import * as pdfjsLib from './libs/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './libs/pdf.worker.min.mjs';
 
+// TextLayer is exported from the same module in pdfjs-dist v6
+const { TextLayer } = pdfjsLib;
+
 const DOM = {
     uploadScreen: document.getElementById('upload-screen'),
     viewerScreen: document.getElementById('viewer-screen'),
@@ -182,6 +185,14 @@ function clearCanvas(pageObj) {
     ctx.clearRect(0, 0, pageObj.canvas.width, pageObj.canvas.height);
 }
 
+function clearTextLayer(pageObj) {
+    if (pageObj.textLayerInstance) {
+        pageObj.textLayerInstance.cancel();
+        pageObj.textLayerInstance = null;
+    }
+    pageObj.textLayerDiv.innerHTML = '';
+}
+
 function initPages() {
     DOM.pdfContainer.innerHTML = '';
     pages = [];
@@ -202,6 +213,8 @@ function initPages() {
                     pageObj.renderTask.cancel();
                     pageObj.renderTask = null;
                 }
+                // Cancel and clear any text layer
+                clearTextLayer(pageObj);
                 if (pageObj.rendered || pageObj.rendering) {
                     clearCanvas(pageObj);
                     pageObj.rendered = false;
@@ -226,17 +239,25 @@ function initPages() {
         canvas.style.width = '100%';
         canvas.style.height = '100%';
 
+        // Create text layer container for selectable text overlay
+        const textLayerDiv = document.createElement('div');
+        textLayerDiv.className = 'textLayer';
+
         wrapper.appendChild(canvas);
+        wrapper.appendChild(textLayerDiv);
         DOM.pdfContainer.appendChild(wrapper);
 
         const pageObj = {
             num: i,
             wrapper,
             canvas,
+            textLayerDiv,
             rendered: false,
             rendering: false,
             renderPending: false,
             renderTask: null,
+            textLayerInstance: null,  // Holds the active TextLayer object
+            textContent: null,       // Cached text content for the page
             pageRef: null
         };
 
@@ -304,6 +325,8 @@ function renderPage(pageObj) {
             pageObj.rendering = false;
             pageObj.renderTask = null;
 
+            // Build the text layer after the canvas has finished rendering
+            renderTextLayer(pageObj, page, viewport);
 
             if (pageObj.renderPending) {
                 pageObj.renderPending = false;
@@ -322,6 +345,39 @@ function renderPage(pageObj) {
              }
         });
     });
+}
+
+async function renderTextLayer(pageObj, page, viewport) {
+    // Cancel any previous text layer for this page
+    clearTextLayer(pageObj);
+
+    try {
+        // Get text content (cache it so we don't re-extract on every zoom)
+        if (!pageObj.textContent) {
+            pageObj.textContent = await page.getTextContent();
+        }
+
+        const textLayerDiv = pageObj.textLayerDiv;
+
+        // Set --total-scale-factor so CSS font-sizes and setLayerDimensions()
+        // container dimensions both compute correctly for the current zoom.
+        textLayerDiv.style.setProperty('--total-scale-factor', scale);
+
+        // Create a new TextLayer instance
+        const textLayer = new TextLayer({
+            textContentSource: pageObj.textContent,
+            container: textLayerDiv,
+            viewport: viewport
+        });
+
+        pageObj.textLayerInstance = textLayer;
+        await textLayer.render();
+    } catch (err) {
+        // Silently ignore cancellation errors (e.g. from rapid zoom)
+        if (err && err.name !== 'AbortException') {
+            console.error('TextLayer render failed:', err);
+        }
+    }
 }
 
 let renderDebounceTimeout = null;
@@ -344,6 +400,7 @@ function applyZoomAtPoint(newScale, focalX, focalY) {
 
     pages.forEach(pageObj => {
         pageObj.rendered = false;
+        clearTextLayer(pageObj);
         if (pageObj.pageRef) {
             const viewport = pageObj.pageRef.getViewport({ scale: scale });
             pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
@@ -362,6 +419,7 @@ function applyZoom() {
     updateZoomVal();
     pages.forEach(pageObj => {
         pageObj.rendered = false;
+        clearTextLayer(pageObj);
         if (pageObj.pageRef) {
             const viewport = pageObj.pageRef.getViewport({ scale: scale });
             pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
