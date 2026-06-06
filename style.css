@@ -186,29 +186,6 @@ body {
     display: block;
 }
 
-/* Ensure text layer doesn't block interactions when it shouldn't but allows selection */
-.textLayer {
-    position: absolute !important;
-    top: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    overflow: hidden !important;
-    opacity: 0.2 !important;
-    line-height: 1.0 !important;
-}
-
-.textLayer > span {
-    color: transparent !important;
-    position: absolute !important;
-    white-space: pre !important;
-    cursor: text !important;
-    transform-origin: 0% 0% !important;
-}
-
-::selection {
-    background: rgba(99, 102, 241, 0.3); /* Accent color for selection */
-}
 
 /* Fullscreen adjustments */
 .viewer-screen:fullscreen .toolbar {

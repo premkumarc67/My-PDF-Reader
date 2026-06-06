@@ -195,7 +195,6 @@ function initPages() {
                 }
                 if (pageObj.rendered || pageObj.rendering) {
                     clearCanvas(pageObj);
-                    pageObj.textLayer.innerHTML = '';
                     pageObj.rendered = false;
                     pageObj.rendering = false;
                     pageObj.renderPending = false;
@@ -216,18 +215,13 @@ function initPages() {
         canvas.className = 'pdf-render-canvas';
         canvas.style.display = 'block';
 
-        const textLayer = document.createElement('div');
-        textLayer.className = 'textLayer';
-
         wrapper.appendChild(canvas);
-        wrapper.appendChild(textLayer);
         DOM.pdfContainer.appendChild(wrapper);
 
         const pageObj = {
             num: i,
             wrapper,
             canvas,
-            textLayer,
             rendered: false,
             rendering: false,
             renderPending: false,
@@ -277,9 +271,6 @@ function renderPage(pageObj) {
         
         pageObj.wrapper.style.height = Math.floor(viewport.height) + 'px';
         pageObj.wrapper.style.width = Math.floor(viewport.width) + 'px';
-        pageObj.textLayer.style.height = Math.floor(viewport.height) + 'px';
-        pageObj.textLayer.style.width = Math.floor(viewport.width) + 'px';
-        pageObj.textLayer.innerHTML = '';
 
         // Clear the canvas BEFORE rendering so no stale content is visible
         clearCanvas(pageObj);
@@ -301,17 +292,7 @@ function renderPage(pageObj) {
             pageObj.rendered = true;
             pageObj.rendering = false;
             pageObj.renderTask = null;
-            
-            // Render text layer
-            page.getTextContent().then(textContent => {
-                pageObj.textLayer.style.setProperty('--scale-factor', scale);
-                pdfjsLib.renderTextLayer({
-                    textContentSource: textContent,
-                    container: pageObj.textLayer,
-                    viewport: viewport,
-                    textDivs: []
-                });
-            });
+
 
             if (pageObj.renderPending) {
                 pageObj.renderPending = false;
@@ -337,7 +318,7 @@ function applyZoom() {
     // Update sizes of all pages and re-render them if they have been rendered
     pages.forEach(pageObj => {
         pageObj.rendered = false;
-        pageObj.textLayer.innerHTML = ''; // Clear text layer
+
         
         if (pageObj.pageRef) {
             const viewport = pageObj.pageRef.getViewport({ scale: scale });
