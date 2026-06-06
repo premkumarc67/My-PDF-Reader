@@ -1,5 +1,6 @@
-// Set up pdf.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// Import pdf.js as ES module from local files
+import * as pdfjsLib from './libs/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = './libs/pdf.worker.min.mjs';
 
 const DOM = {
     uploadScreen: document.getElementById('upload-screen'),
@@ -167,6 +168,11 @@ function loadPDF(data) {
     });
 }
 
+function clearCanvas(pageObj) {
+    const ctx = pageObj.canvas.getContext('2d');
+    ctx.clearRect(0, 0, pageObj.canvas.width, pageObj.canvas.height);
+}
+
 function initPages() {
     DOM.pdfContainer.innerHTML = '';
     pages = [];
@@ -174,10 +180,25 @@ function initPages() {
     if (observer) observer.disconnect();
     observer = new IntersectionObserver((entries) => {
         entries.forEach(entry => {
+            const pageObj = pages[entry.target.dataset.pageIndex];
             if (entry.isIntersecting) {
-                const pageObj = pages[entry.target.dataset.pageIndex];
                 if (!pageObj.rendered && !pageObj.rendering) {
                     renderPage(pageObj);
+                }
+            } else {
+                // Page has scrolled out of the extended viewport.
+                // Cancel any in-flight render and clear the canvas so stale
+                // content from a previous render/zoom level can't ghost through.
+                if (pageObj.renderTask) {
+                    pageObj.renderTask.cancel();
+                    pageObj.renderTask = null;
+                }
+                if (pageObj.rendered || pageObj.rendering) {
+                    clearCanvas(pageObj);
+                    pageObj.textLayer.innerHTML = '';
+                    pageObj.rendered = false;
+                    pageObj.rendering = false;
+                    pageObj.renderPending = false;
                 }
             }
         });
@@ -209,6 +230,8 @@ function initPages() {
             textLayer,
             rendered: false,
             rendering: false,
+            renderPending: false,
+            renderTask: null,
             pageRef: null
         };
 
@@ -227,6 +250,12 @@ function initPages() {
 }
 
 function renderPage(pageObj) {
+    // Cancel any in-flight render before starting a new one
+    if (pageObj.renderTask) {
+        pageObj.renderTask.cancel();
+        pageObj.renderTask = null;
+    }
+
     if (pageObj.rendering) {
         pageObj.renderPending = true;
         return;
@@ -252,6 +281,9 @@ function renderPage(pageObj) {
         pageObj.textLayer.style.width = Math.floor(viewport.width) + 'px';
         pageObj.textLayer.innerHTML = '';
 
+        // Clear the canvas BEFORE rendering so no stale content is visible
+        clearCanvas(pageObj);
+
         const transform = outputScale !== 1
             ? [outputScale, 0, 0, outputScale, 0, 0]
             : null;
@@ -268,6 +300,7 @@ function renderPage(pageObj) {
         renderTask.promise.then(() => {
             pageObj.rendered = true;
             pageObj.rendering = false;
+            pageObj.renderTask = null;
             
             // Render text layer
             page.getTextContent().then(textContent => {
@@ -285,8 +318,12 @@ function renderPage(pageObj) {
                 renderPage(pageObj);
             }
         }).catch(err => {
-             console.error('Render cancelled or failed:', err);
+             // Only log if it's not a deliberate cancellation
+             if (err && err.name !== 'RenderingCancelledException') {
+                 console.error('Render failed:', err);
+             }
              pageObj.rendering = false;
+             pageObj.renderTask = null;
              if (pageObj.renderPending) {
                  pageObj.renderPending = false;
                  renderPage(pageObj);
