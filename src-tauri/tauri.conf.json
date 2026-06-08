@@ -3,10 +3,10 @@
 
   "productName": "PDF Viewer",
   "version": "1.0.0",
-  "identifier": "com.pdfviewer.app",
+  "identifier": "com.pdfviewer.desktop",
 
   "build": {
-    "frontendDist": ".."
+    "frontendDist": "../src"
   },
 
   "app": {
