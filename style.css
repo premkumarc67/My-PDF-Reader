@@ -1,12 +1,13 @@
 :root {
-    --bg-dark: #0f1115;
-    --bg-panel: #1a1d24;
-    --text-primary: #f0f0f5;
-    --text-secondary: #9aa0a6;
-    --accent: #6366f1;
-    --accent-hover: #4f46e5;
-    --border-color: #2d313a;
-    --glass-bg: rgba(26, 29, 36, 0.7);
+    --bg-dark:       #0f1115;
+    --bg-panel:      #1a1d24;
+    --bg-tabbar:     #0c0e12;
+    --text-primary:  #f0f0f5;
+    --text-secondary:#9aa0a6;
+    --accent:        #6366f1;
+    --accent-hover:  #4f46e5;
+    --border-color:  #2d313a;
+    --glass-bg:      rgba(26, 29, 36, 0.7);
 }
 
 * {
@@ -30,7 +31,9 @@ body {
     display: none !important;
 }
 
-/* Upload Screen */
+/* ================================================================
+   UPLOAD SCREEN
+   ================================================================ */
 .upload-screen {
     width: 100%;
     height: 100%;
@@ -92,7 +95,9 @@ body {
     transform: translateY(-2px);
 }
 
-/* Viewer Screen */
+/* ================================================================
+   VIEWER SCREEN  (flex column: tab-bar → controls-bar → panes)
+   ================================================================ */
 .viewer-screen {
     width: 100%;
     height: 100%;
@@ -100,71 +105,197 @@ body {
     flex-direction: column;
 }
 
-.toolbar {
-    height: 60px;
-    background: var(--bg-panel);
+/* ----------------------------------------------------------------
+   TAB BAR  (VS Code style)
+   ---------------------------------------------------------------- */
+.tab-bar {
+    flex-shrink: 0;
+    height: 36px;
+    background: var(--bg-tabbar);
     border-bottom: 1px solid var(--border-color);
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0 1.5rem;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-    z-index: 10;
+    align-items: stretch;
+    overflow: hidden;
+    z-index: 20;
 }
 
-.toolbar-left, .toolbar-center, .toolbar-right {
+/* Horizontal scrollable tab strip */
+.tabs-list {
+    display: flex;
+    align-items: stretch;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex: 0 1 auto;
+    scrollbar-width: none; /* Firefox */
+}
+.tabs-list::-webkit-scrollbar { display: none; } /* Chrome / Edge */
+
+/* Individual tab */
+.tab {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.35rem;
+    padding: 0 0.65rem 0 0.9rem;
+    min-width: 120px;
+    max-width: 210px;
+    border-right: 1px solid var(--border-color);
+    cursor: pointer;
+    color: var(--text-secondary);
+    background: transparent;
+    transition: background 0.12s, color 0.12s;
+    flex-shrink: 0;
+    user-select: none;
 }
 
-.toolbar-center {
-    justify-content: center;
+/* Accent underline for active tab */
+.tab::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: transparent;
+    transition: background 0.12s;
 }
 
-.file-name {
-    font-weight: 600;
-    color: var(--text-primary);
-    max-width: 200px;
+.tab:hover  { background: rgba(255,255,255,0.04); color: var(--text-primary); }
+.tab.active { background: var(--bg-panel);         color: var(--text-primary); }
+.tab.active::after { background: var(--accent); }
+
+/* Tab filename */
+.tab-name {
+    flex: 1;
+    font-size: 0.79rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    font-weight: 400;
+}
+
+/* Close (×) button inside each tab */
+.tab-close {
+    background: transparent;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0;
+    border-radius: 4px;
+    opacity: 0;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: opacity 0.12s, background 0.12s;
+}
+/* Show ×  when tab is hovered or active */
+.tab:hover  .tab-close { opacity: 0.55; }
+.tab.active .tab-close { opacity: 0.55; }
+.tab-close:hover       { opacity: 1 !important; background: rgba(255,255,255,0.12); }
+
+/* "+" open-new-tab button */
+.btn-add-tab {
+    background: transparent;
+    border: none;
+    border-left: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 0 0.8rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+.btn-add-tab:hover {
+    background: rgba(255,255,255,0.06);
+    color: var(--text-primary);
+}
+
+/* ----------------------------------------------------------------
+   CONTROLS BAR  (page navigation + zoom + fullscreen)
+   ---------------------------------------------------------------- */
+.controls-bar {
+    flex-shrink: 0;
+    height: 44px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1.25rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 10;
+}
+
+.controls-left,
+.controls-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Thin vertical divider between zoom and fullscreen */
+.separator {
+    width: 1px;
+    height: 20px;
+    background: var(--border-color);
+    margin: 0 0.2rem;
 }
 
 .page-info {
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
-    min-width: 100px;
+    min-width: 110px;
     text-align: center;
+    font-size: 0.9rem;
 }
 
 .zoom-val {
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
-    width: 45px;
+    width: 46px;
     text-align: center;
+    font-size: 0.9rem;
 }
 
+/* Shared icon-button style (used in controls bar) */
 .btn-icon {
     background: transparent;
     border: none;
     color: var(--text-secondary);
     cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 8px;
+    padding: 0.45rem;
+    border-radius: 7px;
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.2s ease;
+    transition: background 0.2s, color 0.2s;
 }
-
 .btn-icon:hover {
     background: rgba(255, 255, 255, 0.1);
     color: var(--text-primary);
 }
 
-.pdf-container {
+/* ----------------------------------------------------------------
+   PDF VIEWS CONTAINER + PANES
+   ---------------------------------------------------------------- */
+.pdf-views-container {
     flex: 1;
+    position: relative;
+    min-height: 0;          /* critical for flex shrink */
+    overflow: hidden;
+}
+
+/* Each tab gets one absolutely-positioned scrollable pane */
+.pdf-view-pane {
+    position: absolute;
+    inset: 0;
     overflow: auto;
     background-color: #22252b;
     display: flex;
@@ -174,6 +305,15 @@ body {
     gap: 2rem;
 }
 
+/* Non-active panes: completely removed from layout so IntersectionObserver
+   does not fire for off-screen tabs and scroll position is restored on switch */
+.pdf-view-pane.hidden {
+    display: none !important;
+}
+
+/* ----------------------------------------------------------------
+   PAGE WRAPPER  (individual PDF page canvas + text layer)
+   ---------------------------------------------------------------- */
 .page-wrapper {
     position: relative;
     box-shadow: 0 10px 30px rgba(0,0,0,0.5);
@@ -182,27 +322,20 @@ body {
     overflow: hidden;
 }
 
-#pdf-render {
-    display: block;
-}
-
-
-/* Fullscreen adjustments */
-.viewer-screen:fullscreen .toolbar {
+/* ----------------------------------------------------------------
+   FULLSCREEN — hide chrome, pane fills screen
+   ---------------------------------------------------------------- */
+.viewer-screen:fullscreen .tab-bar,
+.viewer-screen:fullscreen .controls-bar {
     display: none;
 }
-
-.viewer-screen:fullscreen .pdf-container {
+.viewer-screen:fullscreen .pdf-view-pane {
     padding: 1rem;
 }
 
-/* ===== Text Layer (selectable text overlay on canvas) ===== */
-/*
- * pdf.js v6 TextLayer requires these CSS custom properties and rules.
- * --total-scale-factor is set dynamically from JS to match the viewport scale.
- * The default of 1 here is a fallback; JS overrides it per render.
- * --min-font-size is set by TextLayer JS on the container.
- */
+/* ================================================================
+   TEXT LAYER  (selectable text overlay on canvas — pdf.js v6)
+   ================================================================ */
 .textLayer {
     --total-scale-factor: 1;
     --scale-round-x: 1px;
@@ -235,7 +368,6 @@ body {
     user-select: text;
 }
 
-/* Span sizing & transforms — critical for aligning text to the canvas */
 .textLayer > :not(.markedContent),
 .textLayer .markedContent span:not(.markedContent) {
     z-index: 1;
@@ -246,31 +378,13 @@ body {
     transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
 }
 
-.textLayer .markedContent {
-    display: contents;
-}
+.textLayer .markedContent { display: contents; }
+.textLayer span.markedContent { top: 0; height: 0; }
 
-.textLayer span.markedContent {
-    top: 0;
-    height: 0;
-}
-
-/* Selection highlight */
-.textLayer ::selection {
-    background: rgba(0, 100, 200, 0.3);
-}
-
-.textLayer ::-moz-selection {
-    background: rgba(0, 100, 200, 0.3);
-}
-
-.textLayer br::selection {
-    background: transparent;
-}
-
-.textLayer br::-moz-selection {
-    background: transparent;
-}
+.textLayer ::selection       { background: rgba(0, 100, 200, 0.3); }
+.textLayer ::-moz-selection  { background: rgba(0, 100, 200, 0.3); }
+.textLayer br::selection     { background: transparent; }
+.textLayer br::-moz-selection{ background: transparent; }
 
 .textLayer .endOfContent {
     display: block;
@@ -283,6 +397,4 @@ body {
     user-select: none;
 }
 
-.textLayer.selecting .endOfContent {
-    top: 0;
-}
+.textLayer.selecting .endOfContent { top: 0; }
