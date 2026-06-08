@@ -1,0 +1,30 @@
+{
+  "name": "pdf-viewer",
+  "version": "1.0.0",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.0.227",
+    "playwright": "^1.60.0"
+  },
+  "description": "",
+  "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/premkumarc67/My-PDF-Reader.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/premkumarc67/My-PDF-Reader/issues"
+  },
+  "homepage": "https://github.com/premkumarc67/My-PDF-Reader#readme"
+}
