@@ -203,18 +203,20 @@ async function loadSession() {
             const tabId = `tab-${++tabCounter}`;
 
             const tab = {
-                id:         tabId,
-                path:       saved.path,
-                name:       saved.name ?? basename(saved.path),
-                pdfDoc:     pdf,
-                pages:      [],
-                observer:   null,
+                id:          tabId,
+                path:        saved.path,
+                name:        saved.name ?? basename(saved.path),
+                pdfDoc:      pdf,
+                pages:       [],
+                observer:    null,
                 pane,
-                tabElement: null,
-                scale:      saved.scale      ?? 1.0,
-                pageNum:    saved.page       ?? 1,
-                scrollTop:  saved.scrollTop  ?? 0,
-                scrollLeft: saved.scrollLeft ?? 0,
+                page1Ref:    null,          // set by initPages
+                tabElement:  null,
+                scale:       saved.scale      ?? 1.0,
+                pageNum:     saved.page       ?? 1,
+                scrollTop:   saved.scrollTop  ?? 0,
+                scrollLeft:  saved.scrollLeft ?? 0,
+                pendingRestore: true,        // scroll-to-page on first switchTab
             };
 
             tabs.push(tab);
@@ -303,12 +305,25 @@ function switchTab(tabId) {
 
     tab.pane.classList.remove('hidden');
 
-    // Force a synchronous layout so scrollTop assignment takes effect
-    // before IntersectionObserver fires (which is async/microtask)
+    // Force a synchronous layout reflow before any scroll manipulation.
     void tab.pane.offsetHeight;
 
-    tab.pane.scrollTop  = tab.scrollTop;
-    tab.pane.scrollLeft = tab.scrollLeft;
+    if (tab.pendingRestore && tab.pages.length > 0) {
+        // Session restore: use offsetTop of the saved page wrapper for pixel-perfect
+        // accuracy regardless of zoom level.  scrollTop saved during a mixed-scale
+        // session would land on the wrong page, but offsetTop is always correct
+        // because initPages already built the layout at the restored scale.
+        tab.pendingRestore = false;
+        const targetWrapper = tab.pages[tab.pageNum - 1]?.wrapper;
+        if (targetWrapper) {
+            // offsetTop is relative to the pane (direct parent) — exactly what we need.
+            tab.pane.scrollTop  = targetWrapper.offsetTop;
+            tab.pane.scrollLeft = 0;
+        }
+    } else {
+        tab.pane.scrollTop  = tab.scrollTop;
+        tab.pane.scrollLeft = tab.scrollLeft;
+    }
 
     tab.tabElement?.classList.add('active');
     tab.tabElement?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
@@ -348,18 +363,20 @@ async function openTab(path, name, bytes) {
     const tabId = `tab-${++tabCounter}`;
 
     const tab = {
-        id:         tabId,
-        path:       path ?? `__nopath__${name}__${Date.now()}`,
+        id:             tabId,
+        path:           path ?? `__nopath__${name}__${Date.now()}`,
         name,
-        pdfDoc:     null,
-        pages:      [],
-        observer:   null,
+        pdfDoc:         null,
+        pages:          [],
+        observer:       null,
         pane,
-        tabElement: null,
-        scale:      1.0,
-        pageNum:    1,
-        scrollTop:  0,
-        scrollLeft: 0,
+        page1Ref:       null,     // set by initPages
+        tabElement:     null,
+        scale:          1.0,
+        pageNum:        1,
+        scrollTop:      0,
+        scrollLeft:     0,
+        pendingRestore: false,    // only true for session-restored tabs
     };
 
     tabs.push(tab);
@@ -471,9 +488,10 @@ async function initPages(tab) {
         tab.observer.observe(wrapper);
     }
 
-    // Set placeholder sizes from the first page so total scroll height is correct.
-    // This must complete BEFORE switchTab restores scrollTop.
+    // Set placeholder sizes from page 1 so total scroll height is correct.
+    // We also store page1Ref so applyZoom can resize ALL wrappers consistently.
     const firstPage = await tab.pdfDoc.getPage(1);
+    tab.page1Ref    = firstPage;            // ← stored for zoom consistency
     const viewport  = firstPage.getViewport({ scale: tab.scale });
     const w = Math.floor(viewport.width);
     const h = Math.floor(viewport.height);
@@ -490,21 +508,25 @@ function attachScrollListener(tab) {
     tab.pane.addEventListener('scroll', () => {
         if (!tab.pages.length) return;
 
-        // Determine which page centre is closest to the viewport centre
+        // Current page = the first (topmost) page that is at least partially
+        // visible in the viewport.  This matches how Adobe Reader and every
+        // other PDF viewer report the page number.
         const cRect  = tab.pane.getBoundingClientRect();
-        const centre = cRect.top + cRect.height / 2;
-        let closest  = tab.pageNum;
-        let minDist  = Infinity;
+        let newPage  = tab.pageNum;
 
-        tab.pages.forEach(p => {
-            const r    = p.wrapper.getBoundingClientRect();
-            const dist = Math.abs(r.top + r.height / 2 - centre);
-            if (dist < minDist) { minDist = dist; closest = p.num; }
-        });
+        for (const p of tab.pages) {
+            const r = p.wrapper.getBoundingClientRect();
+            // A page is "visible" when any part of it is inside the pane's
+            // client rect.  We take the FIRST such page (topmost).
+            if (r.bottom > cRect.top && r.top < cRect.bottom) {
+                newPage = p.num;
+                break;
+            }
+        }
 
-        if (tab.pageNum !== closest) {
-            tab.pageNum = closest;
-            if (tab.id === activeTabId) DOM.pageNum.textContent = closest;
+        if (tab.pageNum !== newPage) {
+            tab.pageNum = newPage;
+            if (tab.id === activeTabId) DOM.pageNum.textContent = newPage;
         }
 
         tab.scrollTop  = tab.pane.scrollTop;
@@ -611,11 +633,15 @@ function applyZoomAtPoint(tab, newScale, focalX, focalY) {
     tab.scale = newScale;
     updateControlsUI(tab);
 
+    // Resize EVERY page wrapper (not just rendered ones) so that scrollTop
+    // values remain consistent with the layout at the new scale.
+    // Unrendered pages fall back to page 1's aspect ratio.
     tab.pages.forEach(p => {
         p.rendered = false;
         clearTextLayer(p);
-        if (p.pageRef) {
-            const vp = p.pageRef.getViewport({ scale: newScale });
+        const ref = p.pageRef ?? tab.page1Ref;
+        if (ref) {
+            const vp = ref.getViewport({ scale: newScale });
             p.wrapper.style.width  = Math.floor(vp.width)  + 'px';
             p.wrapper.style.height = Math.floor(vp.height) + 'px';
         }
@@ -631,11 +657,13 @@ function applyZoomAtPoint(tab, newScale, focalX, focalY) {
 /** Zoom without focal point (button-triggered). */
 function applyZoom(tab) {
     updateControlsUI(tab);
+    // Resize EVERY page wrapper so the layout stays consistent at the new scale.
     tab.pages.forEach(p => {
         p.rendered = false;
         clearTextLayer(p);
-        if (p.pageRef) {
-            const vp = p.pageRef.getViewport({ scale: tab.scale });
+        const ref = p.pageRef ?? tab.page1Ref;
+        if (ref) {
+            const vp = ref.getViewport({ scale: tab.scale });
             p.wrapper.style.width  = Math.floor(vp.width)  + 'px';
             p.wrapper.style.height = Math.floor(vp.height) + 'px';
         }
