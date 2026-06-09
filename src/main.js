@@ -8,12 +8,12 @@ const { TextLayer } = pdfjsLib;
 // ============================================================
 // CONSTANTS
 // ============================================================
-const SESSION_KEY    = 'pdf-reader-session';
-const SCALE_STEP     = 0.10;
-const MAX_SCALE      = 3.0;
-const MIN_SCALE      = 0.5;
-const SAVE_DEBOUNCE  = 500;   // ms — debounce for scroll/zoom saves
-const RENDER_DEBOUNCE = 100;  // ms — debounce after zoom before re-render
+const SESSION_KEY     = 'pdf-reader-session-v2';
+const SCALE_STEP      = 0.10;
+const MAX_SCALE       = 3.0;
+const MIN_SCALE       = 0.5;
+const SAVE_DEBOUNCE   = 400;   // ms — debounce for scroll/zoom saves
+const RENDER_DEBOUNCE = 100;   // ms — debounce after zoom before re-render
 
 // ============================================================
 // DOM REFERENCES
@@ -70,13 +70,63 @@ function getActiveTab() {
 }
 
 function basename(filePath) {
-    return filePath.split(/[\\/]/).pop();
+    return filePath.split(/[/\\]/).pop();
 }
 
-/** Invoke a Tauri backend command.  Gracefully fails outside Tauri. */
-function invoke(cmd, args) {
-    return window.__TAURI__?.core?.invoke(cmd, args)
-        ?? Promise.reject(new Error('Tauri IPC not available'));
+/**
+ * Invoke a Tauri IPC command via the global injected by withGlobalTauri.
+ * Works in Tauri v2 when withGlobalTauri = true in tauri.conf.json.
+ */
+function tauriInvoke(cmd, args) {
+    if (window.__TAURI__?.core?.invoke) {
+        return window.__TAURI__.core.invoke(cmd, args);
+    }
+    return Promise.reject(new Error('Tauri IPC not available'));
+}
+
+/**
+ * Open the native OS file picker using tauri-plugin-dialog.
+ * Falls back to a hidden <input> if running outside Tauri.
+ * @returns {Promise<Array<{path:string, name:string, bytes:Uint8Array}>>}
+ */
+async function pickPdfFiles() {
+    if (window.__TAURI__?.dialog?.open) {
+        // Native Tauri dialog — gives real absolute paths
+        const selected = await window.__TAURI__.dialog.open({
+            multiple: true,
+            filters: [{ name: 'PDF Files', extensions: ['pdf'] }],
+        });
+        if (!selected) return [];
+        const paths = Array.isArray(selected) ? selected : [selected];
+        const results = [];
+        for (const path of paths) {
+            try {
+                const raw = await tauriInvoke('read_file_bytes', { path });
+                results.push({ path, name: basename(path), bytes: new Uint8Array(raw) });
+            } catch (e) {
+                console.error('Could not read file:', path, e);
+                alert(`Could not open "${basename(path)}": ${e.message ?? e}`);
+            }
+        }
+        return results;
+    }
+    // Fallback: web File API (no real path, no session restore)
+    return new Promise(resolve => {
+        const input = DOM.tabFileInput;
+        input.onchange = async () => {
+            const results = [];
+            for (const f of input.files) {
+                if (f.type === 'application/pdf') {
+                    const path = f.path ?? null; // Tauri patches this on File objects
+                    const bytes = new Uint8Array(await f.arrayBuffer());
+                    results.push({ path, name: f.name, bytes });
+                }
+            }
+            input.value = '';
+            resolve(results);
+        };
+        input.click();
+    });
 }
 
 // ============================================================
@@ -84,9 +134,16 @@ function invoke(cmd, args) {
 // ============================================================
 function saveSession() {
     try {
+        // Snapshot live scroll position for the active (visible) tab
+        const active = getActiveTab();
+        if (active) {
+            active.scrollTop  = active.pane.scrollTop;
+            active.scrollLeft = active.pane.scrollLeft;
+        }
+
         const session = {
-            // Only persist tabs that have a real filesystem path
             tabs: tabs
+                // Only persist tabs that have a real on-disk path
                 .filter(t => t.path && !t.path.startsWith('__nopath__'))
                 .map(t => ({
                     path:       t.path,
@@ -96,7 +153,7 @@ function saveSession() {
                     scrollTop:  t.scrollTop,
                     scrollLeft: t.scrollLeft,
                 })),
-            activeTabPath: getActiveTab()?.path ?? null,
+            activeTabPath: active?.path ?? null,
         };
         localStorage.setItem(SESSION_KEY, JSON.stringify(session));
     } catch (e) {
@@ -110,9 +167,9 @@ function debouncedSave() {
 }
 
 /**
- * Restore the previous session from localStorage.
- * Reads each file via the Tauri `read_file_bytes` command.
- * Files that no longer exist are skipped gracefully.
+ * Restore the previous session.
+ * Reads each file via the Rust `read_file_bytes` command.
+ * Missing/deleted files are silently skipped.
  * @returns {Promise<boolean>} true if at least one tab was restored.
  */
 async function loadSession() {
@@ -122,14 +179,14 @@ async function loadSession() {
         if (!raw) return false;
         session = JSON.parse(raw);
     } catch {
-        console.warn('Corrupted session data — starting fresh.');
+        console.warn('Corrupted session — starting fresh.');
         localStorage.removeItem(SESSION_KEY);
         return false;
     }
 
     if (!Array.isArray(session?.tabs) || session.tabs.length === 0) return false;
 
-    // Show viewer early so something is on screen during restore
+    // Show viewer early so the user sees something while tabs load
     DOM.uploadScreen.classList.add('hidden');
     DOM.viewerScreen.classList.remove('hidden');
 
@@ -138,7 +195,7 @@ async function loadSession() {
     for (const saved of session.tabs) {
         if (!saved.path) continue;
         try {
-            const raw   = await invoke('read_file_bytes', { path: saved.path });
+            const raw   = await tauriInvoke('read_file_bytes', { path: saved.path });
             const bytes = new Uint8Array(raw);
             const pdf   = await pdfjsLib.getDocument({ data: bytes }).promise;
 
@@ -162,10 +219,11 @@ async function loadSession() {
 
             tabs.push(tab);
             renderTabElement(tab);
-            await initPages(tab);   // awaited so placeholder heights are ready
+            // initPages awaited so placeholder heights are set before scroll restore
+            await initPages(tab);
             anyLoaded = true;
         } catch (err) {
-            console.warn(`Skipping missing/inaccessible file: ${saved.path}`, err.message ?? err);
+            console.warn(`Skipping "${saved.path}":`, err.message ?? err);
         }
     }
 
@@ -175,7 +233,7 @@ async function loadSession() {
         return false;
     }
 
-    // Activate the previously active tab (fall back to last tab)
+    // Activate previously-active tab (fall back to last)
     const toActivate =
         (session.activeTabPath ? tabs.find(t => t.path === session.activeTabPath) : null)
         ?? tabs.at(-1);
@@ -188,7 +246,7 @@ async function loadSession() {
 // TAB MANAGEMENT
 // ============================================================
 
-/** Create and append a hidden .pdf-view-pane to the container. */
+/** Create and append a hidden .pdf-view-pane to the views container. */
 function createPane() {
     const pane = document.createElement('div');
     pane.className = 'pdf-view-pane hidden';
@@ -196,7 +254,7 @@ function createPane() {
     return pane;
 }
 
-/** Build the .tab element and append it to the tab bar. */
+/** Build a .tab element and append it to the tab strip. */
 function renderTabElement(tab) {
     const el = document.createElement('div');
     el.className = 'tab';
@@ -226,12 +284,11 @@ function renderTabElement(tab) {
 }
 
 /**
- * Switch to the tab with the given id.
- * Saves current scroll position, restores the new tab's scroll
- * with a forced reflow so IntersectionObserver fires correctly.
+ * Activate a tab: save current scroll, hide old pane, show new pane,
+ * restore scroll (synchronous reflow trick), update controls.
  */
 function switchTab(tabId) {
-    // ── Save current tab state ──
+    // Save current tab scroll before hiding
     const current = getActiveTab();
     if (current) {
         current.scrollTop  = current.pane.scrollTop;
@@ -244,27 +301,23 @@ function switchTab(tabId) {
     const tab = getActiveTab();
     if (!tab) return;
 
-    // ── Reveal new tab pane ──
     tab.pane.classList.remove('hidden');
 
-    // Force a synchronous reflow so that:
-    // 1. scrollTop can be set on a now-visible element
-    // 2. IntersectionObserver callbacks (async) fire AFTER the scroll is set
-    // eslint-disable-next-line no-unused-expressions
-    tab.pane.offsetHeight;
+    // Force a synchronous layout so scrollTop assignment takes effect
+    // before IntersectionObserver fires (which is async/microtask)
+    void tab.pane.offsetHeight;
 
     tab.pane.scrollTop  = tab.scrollTop;
     tab.pane.scrollLeft = tab.scrollLeft;
 
     tab.tabElement?.classList.add('active');
-    // Keep active tab visible in the (horizontally scrollable) tab bar
     tab.tabElement?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
 
     updateControlsUI(tab);
     saveSession();
 }
 
-/** Sync the controls bar display to reflect the given tab's state. */
+/** Sync the controls bar to the given tab's state. */
 function updateControlsUI(tab) {
     DOM.pageNum.textContent   = tab.pageNum;
     DOM.pageCount.textContent = tab.pdfDoc?.numPages ?? '--';
@@ -272,20 +325,22 @@ function updateControlsUI(tab) {
 }
 
 /**
- * Open a PDF in a new tab, or focus the existing tab if the same
- * path is already open (deduplication).
- * @param {string|null} path  Absolute file path, or null if unavailable.
+ * Open a PDF in a new tab.
+ * If the same path is already open, just focus that tab (deduplication).
+ * @param {string|null} path  Absolute OS path (or null if not available).
  * @param {string}      name  Display filename.
- * @param {Uint8Array}  bytes Raw PDF bytes.
+ * @param {Uint8Array}  bytes Raw PDF data.
  */
 async function openTab(path, name, bytes) {
-    // Deduplication — focus existing tab when path matches
+    // Deduplication: focus existing tab if same file is already open
     if (path) {
         const existing = tabs.find(t => t.path === path);
-        if (existing) { switchTab(existing.id); return; }
+        if (existing) {
+            switchTab(existing.id);
+            return;
+        }
     }
 
-    // Show viewer
     DOM.uploadScreen.classList.add('hidden');
     DOM.viewerScreen.classList.remove('hidden');
 
@@ -323,9 +378,8 @@ async function openTab(path, name, bytes) {
 }
 
 /**
- * Close the tab with the given id.
- * Frees all resources (observer, render tasks, pdfDoc) and switches
- * to an adjacent tab or returns to the upload screen if no tabs remain.
+ * Close a tab: release resources, remove from DOM, switch to adjacent tab,
+ * or return to upload screen if no tabs remain.
  */
 function closeTab(tabId) {
     const idx = tabs.findIndex(t => t.id === tabId);
@@ -333,19 +387,17 @@ function closeTab(tabId) {
 
     const tab = tabs[idx];
 
-    // ── Release resources ──
+    // Release resources
     tab.observer?.disconnect();
     tab.pages.forEach(p => { p.renderTask?.cancel(); });
     try { tab.pdfDoc?.destroy(); } catch (_) { /* ignore */ }
     tab.pane.remove();
     tab.tabElement?.remove();
-
     tabs.splice(idx, 1);
 
     if (activeTabId === tabId) {
         activeTabId = null;
         if (tabs.length > 0) {
-            // Prefer the tab to the right; fall back to the one to the left
             switchTab(tabs[Math.min(idx, tabs.length - 1)].id);
         } else {
             if (document.fullscreenElement) document.exitFullscreen();
@@ -358,13 +410,13 @@ function closeTab(tabId) {
 }
 
 // ============================================================
-// PAGE RENDERING  — all operations scoped to a specific tab
+// PAGE RENDERING
 // ============================================================
 
 /**
- * Build the page list for a tab, set up its IntersectionObserver
- * and scroll listener.  Awaited so placeholder heights are set
- * before the caller restores scroll position.
+ * Build DOM structure for each page of a tab, attach IntersectionObserver
+ * and scroll listener, then set placeholder dimensions.
+ * Must be awaited so placeholder heights are set before scroll restore.
  */
 async function initPages(tab) {
     tab.pane.innerHTML = '';
@@ -381,7 +433,6 @@ async function initPages(tab) {
                     renderPage(tab, pageObj);
                 }
             } else {
-                // Out of view — cancel in-flight render and clear stale pixels
                 pageObj.renderTask?.cancel();
                 pageObj.renderTask = null;
                 clearTextLayer(pageObj);
@@ -420,9 +471,8 @@ async function initPages(tab) {
         tab.observer.observe(wrapper);
     }
 
-    // Set uniform placeholder sizes so the scrollable area has the right
-    // total height before any page is rendered.  We AWAIT this so that
-    // switchTab() can immediately set scrollTop correctly.
+    // Set placeholder sizes from the first page so total scroll height is correct.
+    // This must complete BEFORE switchTab restores scrollTop.
     const firstPage = await tab.pdfDoc.getPage(1);
     const viewport  = firstPage.getViewport({ scale: tab.scale });
     const w = Math.floor(viewport.width);
@@ -435,12 +485,12 @@ async function initPages(tab) {
     attachScrollListener(tab);
 }
 
-/** Track scroll position and current page for a tab's pane. */
+/** Update page number and save state on scroll. */
 function attachScrollListener(tab) {
     tab.pane.addEventListener('scroll', () => {
         if (!tab.pages.length) return;
 
-        // Find the page whose centre is closest to the pane's centre
+        // Determine which page centre is closest to the viewport centre
         const cRect  = tab.pane.getBoundingClientRect();
         const centre = cRect.top + cRect.height / 2;
         let closest  = tab.pageNum;
@@ -470,13 +520,12 @@ function clearCanvas(pageObj) {
 
 function clearTextLayer(pageObj) {
     pageObj.textLayerInstance?.cancel();
-    pageObj.textLayerInstance    = null;
+    pageObj.textLayerInstance     = null;
     pageObj.textLayerDiv.innerHTML = '';
 }
 
-/** Render one page canvas (and its text layer) at the tab's current scale. */
+/** Render a page canvas at the tab's current scale. */
 function renderPage(tab, pageObj) {
-    // Cancel any in-flight render first
     pageObj.renderTask?.cancel();
     pageObj.renderTask = null;
 
@@ -508,35 +557,31 @@ function renderPage(tab, pageObj) {
         });
         pageObj.renderTask = renderTask;
 
-        renderTask.promise.then(() => {
-            pageObj.rendered   = true;
-            pageObj.rendering  = false;
-            pageObj.renderTask = null;
-            renderTextLayer(tab, pageObj, page, viewport);
-            if (pageObj.renderPending) { pageObj.renderPending = false; renderPage(tab, pageObj); }
-        }).catch(err => {
-            if (err?.name !== 'RenderingCancelledException') {
-                console.error('Render failed:', err);
-            }
-            pageObj.rendering  = false;
-            pageObj.renderTask = null;
-            if (pageObj.renderPending) { pageObj.renderPending = false; renderPage(tab, pageObj); }
-        });
+        renderTask.promise
+            .then(() => {
+                pageObj.rendered   = true;
+                pageObj.rendering  = false;
+                pageObj.renderTask = null;
+                renderTextLayer(tab, pageObj, page, viewport);
+                if (pageObj.renderPending) { pageObj.renderPending = false; renderPage(tab, pageObj); }
+            })
+            .catch(err => {
+                if (err?.name !== 'RenderingCancelledException') console.error('Render failed:', err);
+                pageObj.rendering  = false;
+                pageObj.renderTask = null;
+                if (pageObj.renderPending) { pageObj.renderPending = false; renderPage(tab, pageObj); }
+            });
     });
 }
 
-/** Render the selectable text overlay for one page. */
+/** Overlay selectable text on a rendered page. */
 async function renderTextLayer(tab, pageObj, page, viewport) {
     clearTextLayer(pageObj);
     try {
-        // Cache text content so re-zoom doesn't re-extract
         if (!pageObj.textContent) {
             pageObj.textContent = await page.getTextContent();
         }
-
-        // --total-scale-factor drives CSS font sizing in the text layer
         pageObj.textLayerDiv.style.setProperty('--total-scale-factor', tab.scale);
-
         const tl = new TextLayer({
             textContentSource: pageObj.textContent,
             container:         pageObj.textLayerDiv,
@@ -554,22 +599,18 @@ async function renderTextLayer(tab, pageObj, page, viewport) {
 // ============================================================
 
 /**
- * Zoom centred on a specific point (x, y) in pane-local coordinates.
- * Preserves the world-space point under the cursor.
+ * Zoom around a focal point (pane-local coords) so that point stays fixed.
  */
 function applyZoomAtPoint(tab, newScale, focalX, focalY) {
-    const old  = tab.scale;
-    const sL   = tab.pane.scrollLeft;
-    const sT   = tab.pane.scrollTop;
-
-    // World-space coordinates of the focal point before scaling
-    const wX = (sL + focalX) / old;
-    const wY = (sT + focalY) / old;
+    const old = tab.scale;
+    const sL  = tab.pane.scrollLeft;
+    const sT  = tab.pane.scrollTop;
+    const wX  = (sL + focalX) / old;
+    const wY  = (sT + focalY) / old;
 
     tab.scale = newScale;
     updateControlsUI(tab);
 
-    // Resize page wrappers immediately (so scroll math is correct)
     tab.pages.forEach(p => {
         p.rendered = false;
         clearTextLayer(p);
@@ -580,7 +621,6 @@ function applyZoomAtPoint(tab, newScale, focalX, focalY) {
         }
     });
 
-    // Shift scroll so the focal world point stays under the cursor
     tab.pane.scrollLeft = wX * newScale - focalX;
     tab.pane.scrollTop  = wY * newScale - focalY;
 
@@ -588,7 +628,7 @@ function applyZoomAtPoint(tab, newScale, focalX, focalY) {
     debouncedSave();
 }
 
-/** Zoom without a specific focal point (button-triggered). */
+/** Zoom without focal point (button-triggered). */
 function applyZoom(tab) {
     updateControlsUI(tab);
     tab.pages.forEach(p => {
@@ -604,7 +644,7 @@ function applyZoom(tab) {
     debouncedSave();
 }
 
-/** After a zoom change, re-render only the currently visible pages. */
+/** Re-render visible pages after a zoom change. */
 function debouncedRender(tab) {
     clearTimeout(renderTimer);
     renderTimer = setTimeout(() => {
@@ -655,20 +695,15 @@ function toggleFullScreen() {
 }
 
 // ============================================================
-// FILE HANDLING
+// FILE HANDLING (fallback for web File API / upload screen drop)
 // ============================================================
-
-/**
- * Process a FileList (from input or drag-and-drop).
- * Each PDF is opened in its own tab.  Non-PDFs are warned and skipped.
- */
 async function handleFiles(fileList) {
     for (const file of fileList) {
         if (file.type !== 'application/pdf') {
             alert(`"${file.name}" is not a valid PDF.`);
             continue;
         }
-        // Tauri patches File objects with a .path property holding the real OS path
+        // Tauri patches File objects to expose an absolute .path property
         const path  = file.path ?? null;
         const name  = file.name;
         const bytes = new Uint8Array(await file.arrayBuffer());
@@ -681,29 +716,48 @@ async function handleFiles(fileList) {
 // ============================================================
 function setupDragAndDrop() {
     const dz = DOM.dropZone;
-
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(ev =>
         dz.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); }, false));
-
     ['dragenter', 'dragover'].forEach(ev =>
         dz.addEventListener(ev, () => dz.classList.add('dragover'), false));
-
     ['dragleave', 'drop'].forEach(ev =>
         dz.addEventListener(ev, () => dz.classList.remove('dragover'), false));
-
     dz.addEventListener('drop', e => {
         if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
     }, false);
 }
 
 function setupEventListeners() {
-    // ── File inputs ──────────────────────────────────────────────
-    DOM.fileInput.addEventListener('change', e => {
-        if (e.target.files.length) handleFiles(e.target.files);
-        e.target.value = '';        // allow re-opening the same file
+
+    // ── Browse Files button (upload screen) ─────────────────────
+    // Override label's default behaviour with native Tauri dialog
+    const browseLabel = document.querySelector('label[for="file-input"]');
+    browseLabel?.addEventListener('click', async e => {
+        if (window.__TAURI__?.dialog?.open) {
+            e.preventDefault();
+            const picked = await pickPdfFiles();
+            for (const { path, name, bytes } of picked) {
+                await openTab(path, name, bytes);
+            }
+        }
+        // else: default label→input behaviour takes over (web fallback)
     });
 
-    DOM.btnOpenTab.addEventListener('click', () => DOM.tabFileInput.click());
+    // Fallback for browsers / non-Tauri mode
+    DOM.fileInput.addEventListener('change', e => {
+        if (e.target.files.length) handleFiles(e.target.files);
+        e.target.value = '';
+    });
+
+    // ── "+" open button in tab bar ───────────────────────────────
+    DOM.btnOpenTab.addEventListener('click', async () => {
+        const picked = await pickPdfFiles();
+        for (const { path, name, bytes } of picked) {
+            await openTab(path, name, bytes);
+        }
+    });
+
+    // Fallback file input (non-Tauri)
     DOM.tabFileInput.addEventListener('change', e => {
         if (e.target.files.length) handleFiles(e.target.files);
         e.target.value = '';
@@ -716,16 +770,14 @@ function setupEventListeners() {
     DOM.btnZoomOut.addEventListener('click',    onZoomOut);
     DOM.btnFullscreen.addEventListener('click', toggleFullScreen);
 
-    // ── Ctrl+Scroll zoom (only when over the active pane) ────────
+    // ── Ctrl+Scroll zoom ─────────────────────────────────────────
     window.addEventListener('wheel', e => {
         const tab = getActiveTab();
         if (!tab || !(e.ctrlKey || e.metaKey)) return;
-        if (!tab.pane.contains(e.target)) return;  // only for the active pane
+        if (!tab.pane.contains(e.target)) return;
         e.preventDefault();
-
         const factor   = Math.exp(-e.deltaY * 0.01);
         const newScale = +Math.min(MAX_SCALE, Math.max(MIN_SCALE, tab.scale * factor)).toFixed(3);
-
         if (Math.abs(newScale - tab.scale) > 0.001) {
             const rect = tab.pane.getBoundingClientRect();
             applyZoomAtPoint(tab, newScale, e.clientX - rect.left, e.clientY - rect.top);
@@ -733,13 +785,17 @@ function setupEventListeners() {
     }, { passive: false });
 
     // ── Keyboard shortcuts ───────────────────────────────────────
-    document.addEventListener('keydown', e => {
+    document.addEventListener('keydown', async e => {
         if (e.ctrlKey && e.key === '2') {
             e.preventDefault(); onZoomIn();
         } else if (e.ctrlKey && e.key === '3') {
             e.preventDefault(); onZoomOut();
         } else if (e.ctrlKey && e.key.toLowerCase() === 'o') {
-            e.preventDefault(); DOM.tabFileInput.click();
+            e.preventDefault();
+            const picked = await pickPdfFiles();
+            for (const { path, name, bytes } of picked) {
+                await openTab(path, name, bytes);
+            }
         } else if (
             e.key.toLowerCase() === 'f' &&
             !e.ctrlKey && !e.altKey && !e.metaKey &&
@@ -749,14 +805,15 @@ function setupEventListeners() {
         }
     });
 
-    // ── Save on window close / navigate away ────────────────────
+    // ── Save on app close ────────────────────────────────────────
+    // beforeunload fires synchronously — perfect for a final save
     window.addEventListener('beforeunload', () => {
         const tab = getActiveTab();
         if (tab) {
             tab.scrollTop  = tab.pane.scrollTop;
             tab.scrollLeft = tab.pane.scrollLeft;
         }
-        saveSession();   // synchronous localStorage write
+        saveSession();
     });
 
     setupDragAndDrop();
@@ -770,8 +827,7 @@ async function init() {
 
     const restored = await loadSession();
     if (!restored) {
-        // No valid session — upload screen is already visible (default HTML state)
-        console.log('PDF Viewer ready.  No previous session to restore.');
+        console.log('PDF Viewer ready. No previous session to restore.');
     }
 }
 
